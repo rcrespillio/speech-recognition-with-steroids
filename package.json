@@ -45,7 +45,12 @@
     "clean": "rimraf ./dist",
     "watch": "tsc --watch",
     "prepublishOnly": "npm run build",
-    "release": "standard-version"
+    "release": "standard-version",
+    "test:integration": "node test-continuous-mode.js",
+    "test:manual": "node test-manual.js",
+    "test:mic": "node test-mic-listening.js",
+    "test:real-mic": "node test-real-mic.js",
+    "test:all": "npm run test:integration && npm run test:mic && echo '\\n✅ All tests completed. Run npm run test:real-mic for real-world testing guide.'"
   },
   "devDependencies": {
     "@capacitor/android": "^7.0.0",

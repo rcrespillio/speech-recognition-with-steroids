@@ -43,6 +43,8 @@ public class SpeechRecognition extends Plugin implements Constants {
 
     private JSONArray previousPartialResults = new JSONArray();
     private Runnable pendingSilenceTimeoutTask = null;
+    private boolean isStoppingIntentionally = false;
+    private boolean isRestarting = false;
 
     @Override
     public void load() {
@@ -280,9 +282,13 @@ public class SpeechRecognition extends Plugin implements Constants {
                 .post(() -> {
                     try {
                         SpeechRecognition.this.lock.lock();
-                        JSObject ret = new JSObject();
-                        ret.put("status", "started");
-                        SpeechRecognition.this.notifyListeners(LISTENING_EVENT, ret);
+                        
+                        // Don't send "started" event if we're restarting internally
+                        if (!SpeechRecognition.this.isRestarting) {
+                            JSObject ret = new JSObject();
+                            ret.put("status", "started");
+                            SpeechRecognition.this.notifyListeners(LISTENING_EVENT, ret);
+                        }
                     } finally {
                         SpeechRecognition.this.lock.unlock();
                     }
@@ -368,11 +374,63 @@ public class SpeechRecognition extends Plugin implements Constants {
 
         @Override
         public void onError(int error) {
-            SpeechRecognition.this.stopListening();
+            // If we're intentionally stopping, don't treat this as an error
+            if (SpeechRecognition.this.isStoppingIntentionally) {
+                return;
+            }
+            
             String errorMssg = getErrorText(error);
-
-            // Log the error for debugging
             Logger.error(getLogTag(), "Speech recognition error: " + errorMssg + " (code: " + error + ")", null);
+
+            // In continuous mode, restart listening after "No match" and "Speech timeout" errors
+            if (this.continuous && (error == SpeechRecognizer.ERROR_NO_MATCH || error == SpeechRecognizer.ERROR_SPEECH_TIMEOUT)) {
+                // For "No match" or "Speech timeout" in continuous mode, restart listening
+                Logger.info(getLogTag(), "Continuous mode: restarting after " + errorMssg);
+                
+                // Notify listeners about the error but don't stop
+                JSObject errorData = new JSObject();
+                errorData.put("error", errorMssg);
+                errorData.put("errorCode", error);
+                SpeechRecognition.this.notifyListeners(ERROR_EVENT, errorData);
+                
+                // Restart listening after a short delay (suppress restart events)
+                bridge.getWebView().postDelayed(() -> {
+                    if (SpeechRecognition.this.listening) {
+                        try {
+                            // Set flag to suppress restart events
+                            SpeechRecognition.this.isRestarting = true;
+                            
+                            // Reset the speech recognizer and restart
+                            if (speechRecognizer != null) {
+                                speechRecognizer.destroy();
+                            }
+                            speechRecognizer = SpeechRecognizer.createSpeechRecognizer(bridge.getActivity());
+                            speechRecognizer.setRecognitionListener(this);
+                            
+                            // Create intent with the same parameters as the original
+                            Intent intent = new Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH);
+                            intent.putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM);
+                            intent.putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, this.partialResults);
+                            
+                            speechRecognizer.startListening(intent);
+                            
+                            // Clear the restart flag after a short delay
+                            bridge.getWebView().postDelayed(() -> {
+                                SpeechRecognition.this.isRestarting = false;
+                            }, 200);
+                            
+                        } catch (Exception ex) {
+                            SpeechRecognition.this.isRestarting = false;
+                            Logger.error(getLogTag(), "Failed to restart listening: " + ex.getMessage(), null);
+                        }
+                    }
+                }, 100); // 100ms delay before restart
+                
+                return;
+            }
+            
+            // For other errors or non-continuous mode, stop listening
+            SpeechRecognition.this.stopListening();
 
             // Notify listeners about the error
             JSObject errorData = new JSObject();

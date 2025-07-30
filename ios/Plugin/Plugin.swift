@@ -114,11 +114,11 @@ public class SpeechRecognition: CAPPlugin {
                     }
 
                     if result!.isFinal {
-                        // If continuous mode is enabled and no silence timeout, don't stop listening
-                        if continuous && silenceTimeout == nil {
+                        // If in continuous mode, don't stop listening (wait for user to call stop)
+                        if continuous {
                             // Continue listening
                         } else if let timeout = silenceTimeout, self.hasDetectedSpeech {
-                            // Schedule stop after silence timeout (only if speech has been detected)
+                            // Schedule stop after silence timeout (only if speech has been detected and not in continuous mode)
                             let silenceWorkItem = DispatchWorkItem {
                                 if self.audioEngine?.isRunning == true {
                                     self.audioEngine!.stop()
@@ -135,7 +135,7 @@ public class SpeechRecognition: CAPPlugin {
                             self.pendingSilenceTimeoutWorkItem = silenceWorkItem
                             DispatchQueue.main.asyncAfter(deadline: .now() + Double(timeout) / 1000.0, execute: silenceWorkItem)
                         } else {
-                            // Default behavior: stop immediately
+                            // Default behavior: stop immediately (when not in continuous mode and no silence timeout)
                             self.audioEngine!.stop()
                             self.audioEngine?.inputNode.removeTap(onBus: 0)
                             self.notifyListeners("listeningState", data: ["status": "stopped"])
@@ -146,6 +146,19 @@ public class SpeechRecognition: CAPPlugin {
                 }
 
                 if error != nil {
+                    // In continuous mode, ignore certain errors and continue listening
+                    if continuous && (error!.localizedDescription.contains("No speech") || error!.localizedDescription.contains("No match")) {
+                        // Notify listeners about the error but don't stop
+                        self.notifyListeners("onError", data: [
+                            "error": error!.localizedDescription,
+                            "errorCode": error!._code
+                        ])
+                        
+                        // Continue listening - don't stop the engine
+                        return
+                    }
+                    
+                    // For other errors or non-continuous mode, stop listening
                     self.audioEngine!.stop()
                     self.audioEngine?.inputNode.removeTap(onBus: 0)
                     self.recognitionRequest = nil
