@@ -32,6 +32,7 @@ public class SpeechRecognition extends Plugin implements Constants {
 
     public static final String TAG = "SpeechRecognition";
     private static final String LISTENING_EVENT = "listeningState";
+    private static final String ERROR_EVENT = "onError";
     static final String SPEECH_RECOGNITION = "speechRecognition";
 
     private Receiver languageReceiver;
@@ -81,7 +82,9 @@ public class SpeechRecognition extends Plugin implements Constants {
         String prompt = call.getString("prompt", null);
         boolean partialResults = call.getBoolean("partialResults", false);
         boolean popup = call.getBoolean("popup", false);
-        beginListening(language, maxResults, prompt, partialResults, popup, call);
+        boolean continuous = call.getBoolean("continuous", false);
+        Integer silenceTimeout = call.getInt("silenceTimeout", null);
+        beginListening(language, maxResults, prompt, partialResults, popup, continuous, silenceTimeout, call);
     }
 
     @PluginMethod
@@ -157,6 +160,8 @@ public class SpeechRecognition extends Plugin implements Constants {
         String prompt,
         final boolean partialResults,
         boolean showPopup,
+        boolean continuous,
+        Integer silenceTimeout,
         PluginCall call
     ) {
         Logger.info(getLogTag(), "Beginning to listen for audible speech");
@@ -189,9 +194,18 @@ public class SpeechRecognition extends Plugin implements Constants {
                         }
 
                         speechRecognizer = SpeechRecognizer.createSpeechRecognizer(bridge.getActivity());
+                        
+                        // Check if speech recognizer was created successfully
+                        if (speechRecognizer == null) {
+                            call.reject("Failed to create speech recognizer");
+                            return;
+                        }
+                        
                         SpeechRecognitionListener listener = new SpeechRecognitionListener();
                         listener.setCall(call);
                         listener.setPartialResults(partialResults);
+                        listener.setContinuous(continuous);
+                        listener.setSilenceTimeout(silenceTimeout);
                         speechRecognizer.setRecognitionListener(listener);
                         speechRecognizer.startListening(intent);
                         SpeechRecognition.this.listening(true);
@@ -229,6 +243,10 @@ public class SpeechRecognition extends Plugin implements Constants {
 
         private PluginCall call;
         private boolean partialResults;
+        private boolean continuous;
+        private Integer silenceTimeout;
+        private long lastSpeechTime;
+        private boolean isListening = false;
 
         public void setCall(PluginCall call) {
             this.call = call;
@@ -238,17 +256,39 @@ public class SpeechRecognition extends Plugin implements Constants {
             this.partialResults = partialResults;
         }
 
+        public void setContinuous(boolean continuous) {
+            this.continuous = continuous;
+        }
+
+        public void setSilenceTimeout(Integer silenceTimeout) {
+            this.silenceTimeout = silenceTimeout;
+        }
+
         @Override
-        public void onReadyForSpeech(Bundle params) {}
+        public void onReadyForSpeech(Bundle params) {
+            // Speech recognizer is ready, notify that recording has started
+            bridge
+                .getWebView()
+                .post(() -> {
+                    try {
+                        SpeechRecognition.this.lock.lock();
+                        JSObject ret = new JSObject();
+                        ret.put("status", "started");
+                        SpeechRecognition.this.notifyListeners(LISTENING_EVENT, ret);
+                    } finally {
+                        SpeechRecognition.this.lock.unlock();
+                    }
+                });
+        }
 
         @Override
         public void onBeginningOfSpeech() {
             try {
                 SpeechRecognition.this.lock.lock();
-                // Notify listeners that recording has started
-                JSObject ret = new JSObject();
-                ret.put("status", "started");
-                SpeechRecognition.this.notifyListeners(LISTENING_EVENT, ret);
+                this.isListening = true;
+                this.lastSpeechTime = System.currentTimeMillis();
+                
+                // Speech has been detected, no need to notify again since onReadyForSpeech already did
             } finally {
                 SpeechRecognition.this.lock.unlock();
             }
@@ -262,6 +302,42 @@ public class SpeechRecognition extends Plugin implements Constants {
 
         @Override
         public void onEndOfSpeech() {
+            this.isListening = false;
+            
+            // If continuous mode is enabled and no silence timeout, don't stop listening
+            if (this.continuous && this.silenceTimeout == null) {
+                return;
+            }
+            
+            // Only stop if we're actually listening
+            if (!SpeechRecognition.this.listening) {
+                return;
+            }
+            
+            // If silence timeout is set and speech has been detected, schedule a stop after the timeout
+            if (this.silenceTimeout != null && this.lastSpeechTime > 0) {
+                long silenceDuration = this.silenceTimeout;
+                bridge
+                    .getWebView()
+                    .postDelayed(() -> {
+                        // Only stop if we're still not listening after the timeout
+                        if (!this.isListening && SpeechRecognition.this.listening) {
+                            try {
+                                SpeechRecognition.this.lock.lock();
+                                SpeechRecognition.this.listening(false);
+
+                                JSObject ret = new JSObject();
+                                ret.put("status", "stopped");
+                                SpeechRecognition.this.notifyListeners(LISTENING_EVENT, ret);
+                            } finally {
+                                SpeechRecognition.this.lock.unlock();
+                            }
+                        }
+                    }, silenceDuration);
+                return;
+            }
+            
+            // Default behavior: stop immediately
             bridge
                 .getWebView()
                 .post(() -> {
@@ -283,6 +359,20 @@ public class SpeechRecognition extends Plugin implements Constants {
             SpeechRecognition.this.stopListening();
             String errorMssg = getErrorText(error);
 
+            // Log the error for debugging
+            Logger.error(getLogTag(), "Speech recognition error: " + errorMssg + " (code: " + error + ")", null);
+
+            // Notify listeners about the error
+            JSObject errorData = new JSObject();
+            errorData.put("error", errorMssg);
+            errorData.put("errorCode", error);
+            SpeechRecognition.this.notifyListeners(ERROR_EVENT, errorData);
+
+            // Also notify that recording has stopped
+            JSObject stoppedData = new JSObject();
+            stoppedData.put("status", "stopped");
+            SpeechRecognition.this.notifyListeners(LISTENING_EVENT, stoppedData);
+
             if (this.call != null) {
                 call.reject(errorMssg);
             }
@@ -297,8 +387,15 @@ public class SpeechRecognition extends Plugin implements Constants {
 
                 if (this.call != null) {
                     if (!this.partialResults) {
+                        // For non-partial results, resolve the call
                         this.call.resolve(new JSObject().put("status", "success").put("matches", jsArray));
+                        
+                        // If not in continuous mode, stop listening
+                        if (!this.continuous) {
+                            SpeechRecognition.this.stopListening();
+                        }
                     } else {
+                        // For partial results, just notify listeners
                         JSObject ret = new JSObject();
                         ret.put("matches", jsArray);
                         notifyListeners("partialResults", ret);

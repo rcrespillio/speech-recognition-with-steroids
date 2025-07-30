@@ -18,6 +18,7 @@ public class SpeechRecognition: CAPPlugin {
     private var audioEngine: AVAudioEngine?
     private var recognitionRequest: SFSpeechAudioBufferRecognitionRequest?
     private var recognitionTask: SFSpeechRecognitionTask?
+    private var hasDetectedSpeech: Bool = false
 
     @objc func available(_ call: CAPPluginCall) {
         guard let recognizer = SFSpeechRecognizer() else {
@@ -54,11 +55,16 @@ public class SpeechRecognition: CAPPlugin {
             let language: String = call.getString("language") ?? "en-US"
             let maxResults: Int = call.getInt("maxResults") ?? self.defaultMatches
             let partialResults: Bool = call.getBool("partialResults") ?? false
+            let continuous: Bool = call.getBool("continuous") ?? false
+            let silenceTimeout: Int? = call.getInt("silenceTimeout")
 
             if self.recognitionTask != nil {
                 self.recognitionTask?.cancel()
                 self.recognitionTask = nil
             }
+            
+            // Reset speech detection flag
+            self.hasDetectedSpeech = false
 
             self.audioEngine = AVAudioEngine.init()
             self.speechRecognizer = SFSpeechRecognizer.init(locale: Locale(identifier: language))
@@ -95,6 +101,9 @@ public class SpeechRecognition: CAPPlugin {
                         counter+=1
                     }
 
+                    // Mark that speech has been detected
+                    self.hasDetectedSpeech = true
+                    
                     if partialResults {
                         self.notifyListeners("partialResults", data: ["matches": resultArray])
                     } else {
@@ -104,11 +113,28 @@ public class SpeechRecognition: CAPPlugin {
                     }
 
                     if result!.isFinal {
-                        self.audioEngine!.stop()
-                        self.audioEngine?.inputNode.removeTap(onBus: 0)
-                        self.notifyListeners("listeningState", data: ["status": "stopped"])
-                        self.recognitionTask = nil
-                        self.recognitionRequest = nil
+                        // If continuous mode is enabled and no silence timeout, don't stop listening
+                        if continuous && silenceTimeout == nil {
+                            // Continue listening
+                        } else if let timeout = silenceTimeout, self.hasDetectedSpeech {
+                            // Schedule stop after silence timeout (only if speech has been detected)
+                            DispatchQueue.main.asyncAfter(deadline: .now() + Double(timeout) / 1000.0) {
+                                if self.audioEngine?.isRunning == true {
+                                    self.audioEngine!.stop()
+                                    self.audioEngine?.inputNode.removeTap(onBus: 0)
+                                    self.notifyListeners("listeningState", data: ["status": "stopped"])
+                                    self.recognitionTask = nil
+                                    self.recognitionRequest = nil
+                                }
+                            }
+                        } else {
+                            // Default behavior: stop immediately
+                            self.audioEngine!.stop()
+                            self.audioEngine?.inputNode.removeTap(onBus: 0)
+                            self.notifyListeners("listeningState", data: ["status": "stopped"])
+                            self.recognitionTask = nil
+                            self.recognitionRequest = nil
+                        }
                     }
                 }
 
@@ -117,6 +143,14 @@ public class SpeechRecognition: CAPPlugin {
                     self.audioEngine?.inputNode.removeTap(onBus: 0)
                     self.recognitionRequest = nil
                     self.recognitionTask = nil
+                    
+                    // Notify listeners about the error
+                    self.notifyListeners("onError", data: [
+                        "error": error!.localizedDescription,
+                        "errorCode": error!._code
+                    ])
+                    
+                    // Also notify that recording has stopped
                     self.notifyListeners("listeningState", data: ["status": "stopped"])
                     call.reject(error!.localizedDescription)
                 }

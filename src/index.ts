@@ -7,4 +7,5 @@ const SpeechRecognition = registerPlugin<SpeechRecognitionPlugin>('SpeechRecogni
 });
 
 export * from './definitions';
+export * from './types';
 export { SpeechRecognition };

@@ -88,6 +88,20 @@ export interface SpeechRecognitionPlugin {
     eventName: 'listeningState',
     listenerFunc: (data: { status: 'started' | 'stopped' }) => void,
   ): Promise<PluginListenerHandle>;
+
+  /**
+   * Called when an error occurs during speech recognition.
+   * 
+   * This event is fired when recording stops due to an error.
+   * The recording state will also be set to 'stopped' via the listeningState event.
+   *
+   * @since 5.2.0
+   */
+  addListener(
+    eventName: 'onError',
+    listenerFunc: (data: { error: string; errorCode?: number }) => void,
+  ): Promise<PluginListenerHandle>;
+
   /**
    * Remove all the listeners that are attached to this plugin.
    *
@@ -117,4 +131,27 @@ export interface UtteranceOptions {
    * return partial results if found
    */
   partialResults?: boolean;
+  /**
+   * keep recording continuously without stopping on silence
+   * 
+   * When true, the recording will continue even when there are pauses in speech.
+   * The recording will only stop when explicitly called via the stop() method.
+   * 
+   * @since 5.3.0
+   */
+  continuous?: boolean;
+  /**
+   * silence timeout in milliseconds before stopping recording
+   * 
+   * When set, the recording will stop after this many milliseconds of silence.
+   * This overrides the default system timeout and works even when continuous is true.
+   * 
+   * Examples:
+   * - 1000: Stop after 1 second of silence
+   * - 5000: Stop after 5 seconds of silence
+   * - 10000: Stop after 10 seconds of silence
+   * 
+   * @since 5.4.0
+   */
+  silenceTimeout?: number;
 }
