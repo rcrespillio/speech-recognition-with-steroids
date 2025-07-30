@@ -42,6 +42,7 @@ public class SpeechRecognition extends Plugin implements Constants {
     private boolean listening = false;
 
     private JSONArray previousPartialResults = new JSONArray();
+    private Runnable pendingSilenceTimeoutTask = null;
 
     @Override
     public void load() {
@@ -227,6 +228,13 @@ public class SpeechRecognition extends Plugin implements Constants {
             .post(() -> {
                 try {
                     SpeechRecognition.this.lock.lock();
+                    
+                    // Cancel any pending silence timeout task
+                    if (pendingSilenceTimeoutTask != null) {
+                        bridge.getWebView().removeCallbacks(pendingSilenceTimeoutTask);
+                        pendingSilenceTimeoutTask = null;
+                    }
+                    
                     if (SpeechRecognition.this.listening) {
                         speechRecognizer.stopListening();
                         SpeechRecognition.this.listening(false);
@@ -317,23 +325,27 @@ public class SpeechRecognition extends Plugin implements Constants {
             // If silence timeout is set and speech has been detected, schedule a stop after the timeout
             if (this.silenceTimeout != null && this.lastSpeechTime > 0) {
                 long silenceDuration = this.silenceTimeout;
-                bridge
-                    .getWebView()
-                    .postDelayed(() -> {
-                        // Only stop if we're still not listening after the timeout
-                        if (!this.isListening && SpeechRecognition.this.listening) {
-                            try {
-                                SpeechRecognition.this.lock.lock();
-                                SpeechRecognition.this.listening(false);
+                Runnable silenceTask = () -> {
+                    // Only stop if we're still not listening after the timeout
+                    if (!this.isListening && SpeechRecognition.this.listening) {
+                        try {
+                            SpeechRecognition.this.lock.lock();
+                            SpeechRecognition.this.listening(false);
 
-                                JSObject ret = new JSObject();
-                                ret.put("status", "stopped");
-                                SpeechRecognition.this.notifyListeners(LISTENING_EVENT, ret);
-                            } finally {
-                                SpeechRecognition.this.lock.unlock();
-                            }
+                            JSObject ret = new JSObject();
+                            ret.put("status", "stopped");
+                            SpeechRecognition.this.notifyListeners(LISTENING_EVENT, ret);
+                        } finally {
+                            SpeechRecognition.this.lock.unlock();
                         }
-                    }, silenceDuration);
+                    }
+                    // Clear the pending task reference
+                    SpeechRecognition.this.pendingSilenceTimeoutTask = null;
+                };
+                
+                // Store the task so it can be cancelled if user calls stop()
+                SpeechRecognition.this.pendingSilenceTimeoutTask = silenceTask;
+                bridge.getWebView().postDelayed(silenceTask, silenceDuration);
                 return;
             }
             

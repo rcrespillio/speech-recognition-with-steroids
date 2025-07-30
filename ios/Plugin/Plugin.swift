@@ -19,6 +19,7 @@ public class SpeechRecognition: CAPPlugin {
     private var recognitionRequest: SFSpeechAudioBufferRecognitionRequest?
     private var recognitionTask: SFSpeechRecognitionTask?
     private var hasDetectedSpeech: Bool = false
+    private var pendingSilenceTimeoutWorkItem: DispatchWorkItem?
 
     @objc func available(_ call: CAPPluginCall) {
         guard let recognizer = SFSpeechRecognizer() else {
@@ -118,7 +119,7 @@ public class SpeechRecognition: CAPPlugin {
                             // Continue listening
                         } else if let timeout = silenceTimeout, self.hasDetectedSpeech {
                             // Schedule stop after silence timeout (only if speech has been detected)
-                            DispatchQueue.main.asyncAfter(deadline: .now() + Double(timeout) / 1000.0) {
+                            let silenceWorkItem = DispatchWorkItem {
                                 if self.audioEngine?.isRunning == true {
                                     self.audioEngine!.stop()
                                     self.audioEngine?.inputNode.removeTap(onBus: 0)
@@ -126,7 +127,13 @@ public class SpeechRecognition: CAPPlugin {
                                     self.recognitionTask = nil
                                     self.recognitionRequest = nil
                                 }
+                                // Clear the pending work item reference
+                                self.pendingSilenceTimeoutWorkItem = nil
                             }
+                            
+                            // Store the work item so it can be cancelled if user calls stop()
+                            self.pendingSilenceTimeoutWorkItem = silenceWorkItem
+                            DispatchQueue.main.asyncAfter(deadline: .now() + Double(timeout) / 1000.0, execute: silenceWorkItem)
                         } else {
                             // Default behavior: stop immediately
                             self.audioEngine!.stop()
@@ -175,6 +182,12 @@ public class SpeechRecognition: CAPPlugin {
 
     @objc func stop(_ call: CAPPluginCall) {
         DispatchQueue.global(qos: DispatchQoS.QoSClass.default).async {
+            // Cancel any pending silence timeout task
+            if let pendingWorkItem = self.pendingSilenceTimeoutWorkItem {
+                pendingWorkItem.cancel()
+                self.pendingSilenceTimeoutWorkItem = nil
+            }
+            
             if let engine = self.audioEngine, engine.isRunning {
                 engine.stop()
                 self.recognitionRequest?.endAudio()
